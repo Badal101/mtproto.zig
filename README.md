@@ -17,7 +17,7 @@ Disguises Telegram traffic as standard TLS 1.3 HTTPS to bypass network censorshi
 ---
 
 <p align="center">
-<a href="#why-this-one">Why this one?</a> · <a href="#install">Install</a> · <a href="#update">Update</a> · <a href="#other-mtbuddy-commands">Commands</a> · <a href="#upstream-routing">Routing</a> · <a href="#configuration">Config</a> · <a href="#monitoring-dashboard">Dashboard</a> · <a href="#building-locally">Build</a> · <a href="#docker">Docker</a> · <a href="#troubleshooting--stuck-on-updating">FAQ</a>
+<a href="#why-this-one">Why this one?</a> · <a href="#install">Install</a> · <a href="#update">Update</a> · <a href="#other-mtbuddy-commands">Commands</a> · <a href="#upstream-routing">Routing</a> · <a href="#configuration">Config</a> · <a href="#monitoring-dashboard">Dashboard</a> · <a href="#building-locally">Build</a> · <a href="#docker">Docker</a> · <a href="#trust--security">Trust</a> · <a href="#known-limitations--compatibility">Compatibility</a> · <a href="#troubleshooting--stuck-on-updating">FAQ</a>
 </p>
 
 ---
@@ -68,14 +68,13 @@ All installation, updates, and management are done through **mtbuddy** — a nat
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sleep3r/mtproto.zig/main/deploy/bootstrap.sh | sudo bash
+
+# Explicitly allow unsigned bootstrap mode (not recommended)
+curl -fsSL https://raw.githubusercontent.com/sleep3r/mtproto.zig/main/deploy/bootstrap.sh | sudo bash -s -- --insecure
+# or: MTPROTO_INSECURE=1
 ```
 
-This downloads the latest `mtbuddy` binary, verifies its SHA-256 checksum from the GitHub Release, and runs `mtbuddy --help`. Then install the proxy:
-
-```bash
-# Optional: enforce minisign verification for bootstrap checksum files
-export MTPROTO_MINISIGN_PUBKEY="RW..."
-```
+This downloads the latest `mtbuddy` binary, verifies minisign signature + SHA-256 checksum from the GitHub Release, and runs `mtbuddy --help`. Then install the proxy:
 
 ```bash
 # Minimal — auto-generates a secret, enables all DPI bypass modules
@@ -89,6 +88,9 @@ sudo mtbuddy install --port 443 --domain wb.ru --no-dpi --yes
 
 # Install using an existing config file (auto-maps port and domain)
 sudo mtbuddy install --config /path/to/config.toml --yes
+
+# Explicitly allow unsigned mode (not recommended)
+sudo mtbuddy install --insecure --port 443 --domain wb.ru --yes
 ```
 
 At the end, mtbuddy prints a ready-to-use `tg://` connection link.
@@ -131,23 +133,30 @@ sudo mtbuddy --interactive
 | `--user, -u` | `user` | Username in `config.toml` |
 | `--config, -c` | — | Use existing `config.toml` file |
 | `--yes, -y` | — | Skip confirmation prompt |
+| `--max-connections <N>` | `512` | Max proxy connections |
 | `--bind, -b` | — | Bind to specific IP (default: all interfaces) |
 | `--no-masking` | — | Disable Nginx masking |
 | `--no-nfqws` | — | Disable nfqws TCP desync |
 | `--no-tcpmss` | — | Disable TCPMSS=88 |
 | `--no-dpi` | — | Disable all DPI modules |
 | `--middle-proxy` | — | Enable Telegram MiddleProxy relay |
+| `--ipv6-hop` | — | Enable IPv6 auto-hopping |
+| `--version, -v <tag>` | `latest` | Release version to install |
+| `--insecure` | — | Allow unsigned assets (not recommended) |
 
 ---
 
 ## Update
 
 ```bash
-# Update to latest release (verifies checksum, checks CPU compat, auto-rollback on failure)
+# Update to latest release (verifies minisign + checksum, checks CPU compat, auto-rollback on failure)
 sudo mtbuddy update
 
 # Pin to a specific version
 sudo mtbuddy update --version v0.11.1
+
+# Explicitly allow unsigned mode (not recommended)
+sudo mtbuddy update --insecure
 ```
 
 ---
@@ -157,6 +166,14 @@ sudo mtbuddy update --version v0.11.1
 ```bash
 # Show proxy and module status
 sudo mtbuddy status
+
+# Validate and inspect config
+sudo mtbuddy config validate
+sudo mtbuddy config doctor
+sudo mtbuddy config print-effective
+
+# Hot-reload config (SIGHUP, reloadable settings only)
+sudo mtbuddy reload
 
 # Setup DPI modules after the fact
 sudo mtbuddy setup masking --domain wb.ru
@@ -179,6 +196,7 @@ sudo mtbuddy update-dns 1.2.3.4
 
 # Full help
 mtbuddy --help
+mtbuddy --lang ru --help
 ```
 
 ---
@@ -188,6 +206,7 @@ mtbuddy --help
 ```bash
 sudo systemctl status mtproto-proxy
 sudo journalctl -u mtproto-proxy -f
+sudo systemctl reload mtproto-proxy   # SIGHUP hot-reload (where possible)
 sudo systemctl restart mtproto-proxy
 ```
 
@@ -298,6 +317,7 @@ port = 443
 max_connections = 512
 idle_timeout_sec = 120
 handshake_timeout_sec = 15
+graceful_shutdown_timeout_sec = 15
 log_level = "info"        # debug | info | warn | err
 rate_limit_per_subnet = 30
 tag = ""                  # Optional: promotion tag from @MTProxybot
@@ -342,6 +362,7 @@ alice = true   # bypass MiddleProxy for this user
 | `[server] max_connections` | `512` | Concurrent connection cap, auto-clamped by RAM and `RLIMIT_NOFILE` |
 | `[server] idle_timeout_sec` | `120` | Connection idle timeout |
 | `[server] handshake_timeout_sec` | `15` | Handshake completion timeout |
+| `[server] graceful_shutdown_timeout_sec` | `15` | SIGTERM drain timeout before force-close |
 | `[server] middleproxy_buffer_kb` | `1024` | ME per-connection buffer (KiB). Below 1024 may cause overflow on media traffic |
 | `[server] tag` | — | 32 hex-char promotion tag from [@MTProxybot](https://t.me/MTProxybot) |
 | `[server] log_level` | `"info"` | `debug` / `info` / `warn` / `err` |
@@ -439,12 +460,17 @@ cd mtproto.zig
 
 make build      # cross-compile ReleaseFast binaries for Linux x86_64_v3+aes
 make test       # run Zig tests
+make e2e        # run E2E/integration harness
 make fmt        # format Zig sources
 make deploy     # build + deploy to SERVER (see Makefile)
 make dashboard  # SSH tunnel for web dashboard (localhost:61208)
+
+# optional performance checks
+zig build bench
+zig build soak
 ```
 
-Release builders can embed a minisign public key into `mtbuddy`:
+Release builders can override the default pinned minisign key if needed:
 
 ```bash
 zig build -Dminisign_pubkey=RW... -Doptimize=ReleaseFast -Dtarget=x86_64-linux
@@ -481,6 +507,47 @@ docker buildx build --platform linux/amd64,linux/arm64 -t your-registry/mtproto-
 Published `linux/amd64` images are built with a portable CPU profile (`-Dcpu=x86_64`) to avoid `Illegal instruction` crashes on older VPS CPUs.
 
 > OS-level mitigations (iptables TCPMSS, nfqws, etc.) are not applied inside the container; only the proxy binary runs there.
+
+---
+
+## Trust & Security
+
+- [SECURITY.md](SECURITY.md) - vulnerability reporting policy and response process
+- [THREAT_MODEL.md](THREAT_MODEL.md) - security goals, non-goals, adversary model, residual risks
+- [CONTRIBUTING.md](CONTRIBUTING.md) - dev workflow (`fmt`/`test`/`e2e`/`bench`) and PR expectations
+- [CHANGELOG.md](CHANGELOG.md) - release history
+- [LICENSE](LICENSE) - MIT license terms
+
+Repository governance:
+- [`.github/CODEOWNERS`](.github/CODEOWNERS)
+- issue templates under [`.github/ISSUE_TEMPLATE`](.github/ISSUE_TEMPLATE)
+
+---
+
+## Known Limitations & Compatibility
+
+For a full model see [THREAT_MODEL.md](THREAT_MODEL.md). Quick operational summary:
+
+- **Known limitations**
+  - This is a transport-hardening proxy, not an anonymity network.
+  - Bypass quality can degrade as DPI strategies evolve.
+  - Dashboard/metrics are plaintext by default; do not expose publicly without auth/TLS.
+- **Region-specific caveats**
+  - ISP behavior differs by country/region; configs are not universally portable.
+  - IPv6 and AAAA handling vary heavily across providers and can impact iOS/Desktop connection latency.
+  - Tunnel routing depends on host policy routing and allowed VPN protocols in that region.
+- **Telegram client compatibility**
+  - Official Telegram Android/iOS/Desktop: expected to work on current releases.
+  - Third-party clients: best effort only.
+- **Kernel/OS compatibility matrix**
+  - Linux `x86_64`: supported (primary target)
+  - Linux `aarch64`: supported
+  - Docker on Linux: supported with caveats (OS-level DPI modules are host-side)
+  - macOS/Windows runtime: not supported (Linux runtime target only)
+- **What can break after Telegram/DC changes**
+  - MiddleProxy metadata and endpoint behavior
+  - handshake expectations in newer Telegram clients
+  - DC/media routing edge cases (for example DC203 behavior)
 
 ---
 

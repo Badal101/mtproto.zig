@@ -3,11 +3,12 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const pinned_minisign_pubkey = "RWT8YwmUuq/3WpUnYJjD6rAfQugYdZKWr61U3O+2kdNvriLSyrvVU/NO";
     const minisign_pubkey = b.option(
         []const u8,
         "minisign_pubkey",
         "Minisign public key (base64) for release signature verification",
-    ) orelse "";
+    ) orelse pinned_minisign_pubkey;
 
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "minisign_pubkey", minisign_pubkey);
@@ -19,6 +20,11 @@ pub fn build(b: *std.Build) void {
     });
     const linux_io_mod = b.createModule(.{
         .root_source_file = b.path("src/linux_io.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const proxy_config_mod = b.createModule(.{
+        .root_source_file = b.path("src/config.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -94,6 +100,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "tunnel", .module = tunnel_mod },
             .{ .name = "version", .module = version_mod },
             .{ .name = "linux_io", .module = linux_io_mod },
+            .{ .name = "proxy_config", .module = proxy_config_mod },
             .{ .name = "build_options", .module = build_options_mod },
         },
     });
@@ -140,4 +147,23 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_ctl_tests.step);
+
+    // CLI localization smoke test (Linux hosts only).
+    if (target.query.isNative() and target.result.os.tag == .linux) {
+        const run_mtbuddy_help_ru = b.addRunArtifact(ctl_exe);
+        run_mtbuddy_help_ru.addArgs(&.{ "--lang", "ru", "--help" });
+        test_step.dependOn(&run_mtbuddy_help_ru.step);
+    }
+
+    // E2E / integration harness (process-level scenarios).
+    const e2e_cmd = b.addSystemCommand(&.{ "python3", "test/e2e/run.py" });
+    e2e_cmd.step.dependOn(&exe.step);
+    e2e_cmd.addArg("--proxy-bin");
+    e2e_cmd.addFileArg(exe.getEmittedBin());
+    if (b.args) |args| {
+        e2e_cmd.addArgs(args);
+    }
+
+    const e2e_step = b.step("e2e", "Run E2E/integration tests");
+    e2e_step.dependOn(&e2e_cmd.step);
 }
