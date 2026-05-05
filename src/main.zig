@@ -11,6 +11,7 @@ const obfuscation = @import("protocol/obfuscation.zig");
 const tls = @import("protocol/tls.zig");
 const config = @import("config.zig");
 const proxy = @import("proxy/proxy.zig");
+const linux_io = @import("linux_io");
 const version_mod = @import("version");
 
 // Custom lock-free log function: formats into a stack buffer and writes
@@ -32,7 +33,7 @@ pub const std_options = std.Options{
 
 fn lockFreeLog(
     comptime message_level: std.log.Level,
-    comptime scope: @Type(.enum_literal),
+    comptime scope: @EnumLiteral(),
     comptime format: []const u8,
     args: anytype,
 ) void {
@@ -42,48 +43,52 @@ fn lockFreeLog(
     const level_txt = comptime message_level.asText();
     const prefix2 = comptime if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "): ";
     var buf: [4096]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, level_txt ++ prefix2 ++ format ++ "\n", args) catch return;
-    _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch return;
+    const msg = std.fmt.bufPrint(&buf, level_txt ++ prefix2 ++ format ++ "\n", args) catch |err| switch (err) {
+        error.NoSpaceLeft => blk: {
+            if (buf.len >= 2) {
+                buf[buf.len - 2] = '\n';
+                buf[buf.len - 1] = 0;
+                break :blk buf[0 .. buf.len - 1];
+            }
+            return;
+        },
+        else => return,
+    };
+    linux_io.writeAllFd(std.posix.STDERR_FILENO, msg);
 }
 
 const log = std.log.scoped(.mtproto);
 
 pub const version = version_mod.version;
 
-// ============= Output Helpers (Zig 0.15 compatible) =============
+// ============= Output Helpers =============
 
 /// Write a formatted string to stdout via posix write.
 fn writeStdout(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
     const slice = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    _ = std.posix.write(std.posix.STDOUT_FILENO, slice) catch return;
+    linux_io.writeAllFd(std.posix.STDOUT_FILENO, slice);
 }
 
 /// Write a formatted string to stderr.
 fn writeStderr(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
     const slice = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    _ = std.posix.write(std.posix.STDERR_FILENO, slice) catch return;
-}
-
-/// Write a hex byte to stdout.
-fn writeHexByte(byte: u8) void {
-    const hex = "0123456789abcdef";
-    const out = [2]u8{ hex[byte >> 4], hex[byte & 0x0f] };
-    _ = std.posix.write(std.posix.STDOUT_FILENO, &out) catch return;
+    linux_io.writeAllFd(std.posix.STDERR_FILENO, slice);
 }
 
 /// Write raw string to stdout.
 fn writeRaw(s: []const u8) void {
-    _ = std.posix.write(std.posix.STDOUT_FILENO, s) catch return;
+    linux_io.writeAllFd(std.posix.STDOUT_FILENO, s);
 }
 
 // ============= Public IP Detection =============
 
 fn fetchUrlBytes(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
     const uri = try std.Uri.parse(url);
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    var client: std.http.Client = .{ .allocator = allocator };
+    var client: std.http.Client = .{ .allocator = allocator, .io = io };
     defer client.deinit();
 
     var req = try client.request(.GET, uri, .{
@@ -165,34 +170,6 @@ fn detectPublicIpFromServices(
     return null;
 }
 
-fn encodeServerForProxyLink(server: []const u8, out: []u8) []const u8 {
-    var required_len: usize = 0;
-    for (server) |c| {
-        required_len += if (c == ':' or c == '[' or c == ']') 3 else 1;
-    }
-
-    // Keep original value if it does not fit to avoid silent truncation.
-    if (required_len > out.len) return server;
-
-    var pos: usize = 0;
-    for (server) |c| {
-        if (c == ':') {
-            @memcpy(out[pos..][0..3], "%3A");
-            pos += 3;
-        } else if (c == '[') {
-            @memcpy(out[pos..][0..3], "%5B");
-            pos += 3;
-        } else if (c == ']') {
-            @memcpy(out[pos..][0..3], "%5D");
-            pos += 3;
-        } else {
-            out[pos] = c;
-            pos += 1;
-        }
-    }
-    return out[0..pos];
-}
-
 const CapacityEstimate = struct {
     total_ram_bytes: u64,
     per_conn_bytes: u64,
@@ -202,14 +179,23 @@ const CapacityEstimate = struct {
 fn detectTotalRamBytes(allocator: std.mem.Allocator) ?u64 {
     if (builtin.os.tag != .linux) return null;
 
-    const file = std.fs.openFileAbsolute("/proc/meminfo", .{}) catch return null;
-    defer file.close();
+    // Prefer sysinfo(2): no /proc dependency and works under stricter sandboxing.
+    if (detectTotalRamBytesSysinfo()) |total| {
+        return total;
+    }
 
-    const content = file.readToEndAlloc(allocator, 16 * 1024) catch return null;
-    defer allocator.free(content);
+    // Fallback: parse /proc/meminfo.
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const content = std.Io.Dir.openFileAbsolute(io, "/proc/meminfo", .{}) catch return null;
+    defer content.close(io);
+    var reader = content.reader(io, &.{});
+    const bytes = reader.interface.allocRemaining(allocator, .limited(16 * 1024)) catch return null;
+    const data = bytes;
+    defer allocator.free(data);
+    const content_bytes = data;
 
     const key = "MemTotal:";
-    var lines = std.mem.splitScalar(u8, content, '\n');
+    var lines = std.mem.splitScalar(u8, content_bytes, '\n');
     while (lines.next()) |line| {
         if (!std.mem.startsWith(u8, line, key)) continue;
 
@@ -224,6 +210,19 @@ fn detectTotalRamBytes(allocator: std.mem.Allocator) ?u64 {
     }
 
     return null;
+}
+
+fn detectTotalRamBytesSysinfo() ?u64 {
+    if (builtin.os.tag != .linux) return null;
+
+    var info: std.os.linux.Sysinfo = undefined;
+    const rc = std.os.linux.sysinfo(&info);
+    if (std.os.linux.errno(rc) != .SUCCESS) return null;
+
+    const mem_unit: u128 = if (info.mem_unit == 0) 1 else info.mem_unit;
+    const total_bytes: u128 = @as(u128, info.totalram) * mem_unit;
+    if (total_bytes == 0 or total_bytes > std.math.maxInt(u64)) return null;
+    return @intCast(total_bytes);
 }
 
 fn estimateCapacity(cfg: *const config.Config, total_ram_bytes: u64) CapacityEstimate {
@@ -266,7 +265,7 @@ fn enforceCapacitySafety(cfg: *config.Config, capacity_estimate: ?CapacityEstima
         if (builtin.os.tag == .linux and !cfg.unsafe_override_limits) {
             const log_main = std.log.scoped(.config);
             log_main.warn(
-                "could not read /proc/meminfo; skipping max_connections safety clamp. " ++
+                "could not detect total RAM; skipping max_connections safety clamp. " ++
                     "set a conservative [server].max_connections to avoid OOM.",
                 .{},
             );
@@ -320,7 +319,6 @@ fn printBanner(allocator: std.mem.Allocator, cfg: config.Config, capacity_estima
     const cyan = "\x1b[36m";
     const green = "\x1b[32m";
     const yellow = "\x1b[33m";
-    const magenta = "\x1b[35m";
     const white = "\x1b[97m";
     const red = "\x1b[31m";
 
@@ -384,61 +382,27 @@ fn printBanner(allocator: std.mem.Allocator, cfg: config.Config, capacity_estima
     writeStdout("  " ++ D ++ "───" ++ R ++ " " ++ B ++ cyan ++ "USERS" ++ R ++ " ({d}) " ++ D ++ "────────────────────────────────────" ++ R ++ "\n", .{cfg.users.count()});
     var it = @constCast(&cfg.users).iterator();
     while (it.next()) |entry| {
-        writeStdout("      " ++ green ++ "●" ++ R ++ " " ++ B ++ "{s}" ++ R ++ "  " ++ D, .{entry.key_ptr.*});
-        for (entry.value_ptr.*) |byte| {
-            writeHexByte(byte);
-        }
-        writeRaw(R ++ "\n");
+        writeStdout("      " ++ green ++ "●" ++ R ++ " " ++ B ++ "{s}" ++ R ++ "\n", .{entry.key_ptr.*});
     }
     writeRaw("\n");
 
-    // ─── LINKS ──────────────────────────────────────
-    writeRaw("  " ++ D ++ "───" ++ R ++ " " ++ B ++ cyan ++ "LINKS" ++ R ++ " " ++ D ++ "──────────────────────────────────────" ++ R ++ "\n");
+    // ─── SECURITY ───────────────────────────────────
+    writeRaw("  " ++ D ++ "───" ++ R ++ " " ++ B ++ cyan ++ "SECURITY" ++ R ++ " " ++ D ++ "───────────────────────────────────" ++ R ++ "\n");
     if (!has_ip) {
-        writeRaw("      " ++ red ++ "⚠  Could not detect IP. Replace <SERVER_IP> manually." ++ R ++ "\n");
+        writeRaw("      " ++ red ++ "⚠  Could not detect public IP automatically." ++ R ++ "\n");
     }
-
-    var encoded_ip_buf: [768]u8 = undefined;
-    const safe_server_ip = encodeServerForProxyLink(server_ip, &encoded_ip_buf);
-
-    var it2 = @constCast(&cfg.users).iterator();
-    while (it2.next()) |entry| {
-        writeStdout("      " ++ B ++ magenta ++ "{s}" ++ R ++ "\n", .{entry.key_ptr.*});
-
-        // tg:// deep link
-        writeStdout("      " ++ cyan ++ "tg://" ++ R ++ "proxy?server={s}&port={d}&secret=", .{ safe_server_ip, cfg.port });
-        writeRaw(green ++ "ee");
-        for (entry.value_ptr.*) |byte| {
-            writeHexByte(byte);
-        }
-        for (cfg.tls_domain) |byte| {
-            writeHexByte(byte);
-        }
-        writeRaw(R ++ "\n");
-
-        // t.me link
-        writeStdout("      " ++ D ++ "t.me/proxy?server={s}&port={d}&secret=ee", .{ safe_server_ip, cfg.port });
-        for (entry.value_ptr.*) |byte| {
-            writeHexByte(byte);
-        }
-        for (cfg.tls_domain) |byte| {
-            writeHexByte(byte);
-        }
-        writeRaw(R ++ "\n");
-    }
+    writeRaw("      " ++ D ++ "User secrets and proxy links are hidden in runtime logs." ++ R ++ "\n");
+    writeRaw("      " ++ D ++ "Use mtbuddy install output or trusted local tooling to generate links." ++ R ++ "\n");
 
     // Footer
     writeRaw("\n  " ++ D ++ "──────────────────────────────────────────────────" ++ R ++ "\n");
     writeRaw("  " ++ B ++ cyan ++ "⏳ Waiting for connections..." ++ R ++ "\n\n");
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{ .thread_safe = false }){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
     // Parse config path from args
-    var args = try std.process.argsWithAllocator(allocator);
+    var args = try init.minimal.args.iterateAllocator(allocator);
     defer args.deinit();
     _ = args.next(); // skip program name
     const first_arg = args.next();
@@ -502,7 +466,7 @@ pub fn main() !void {
     cfg.emitWarnings();
 
     // Create shared state (DI — no globals)
-    var state = proxy.ProxyState.init(allocator, cfg);
+    var state = try proxy.ProxyState.init(allocator, cfg);
     defer state.deinit();
 
     // Run the proxy

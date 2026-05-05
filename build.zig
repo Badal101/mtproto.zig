@@ -3,8 +3,22 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const minisign_pubkey = b.option(
+        []const u8,
+        "minisign_pubkey",
+        "Minisign public key (base64) for release signature verification",
+    ) orelse "";
+
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "minisign_pubkey", minisign_pubkey);
+    const build_options_mod = build_options.createModule();
     const version_mod = b.createModule(.{
         .root_source_file = b.path("src/version.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const linux_io_mod = b.createModule(.{
+        .root_source_file = b.path("src/linux_io.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -15,6 +29,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "version", .module = version_mod },
+            .{ .name = "linux_io", .module = linux_io_mod },
         },
     });
 
@@ -78,6 +93,8 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "tunnel", .module = tunnel_mod },
             .{ .name = "version", .module = version_mod },
+            .{ .name = "linux_io", .module = linux_io_mod },
+            .{ .name = "build_options", .module = build_options_mod },
         },
     });
 
@@ -104,6 +121,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "version", .module = version_mod },
+            .{ .name = "linux_io", .module = linux_io_mod },
         },
     });
 

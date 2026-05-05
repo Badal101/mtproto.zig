@@ -4,6 +4,8 @@
 //! Format is compatible with the Rust telemt config.toml.
 
 const std = @import("std");
+const net = std.Io.net;
+const default_tls_domain = "google.com";
 
 pub const UpstreamMode = enum {
     /// Automatic egress mode (default).
@@ -56,11 +58,11 @@ fn stripInlineComment(value: []const u8) []const u8 {
         }
 
         if (!in_quotes and (ch == '#' or ch == ';')) {
-            return std.mem.trimRight(u8, value[0..i], &[_]u8{ ' ', '\t' });
+            return std.mem.trim(u8, value[0..i], &[_]u8{ ' ', '\t' });
         }
     }
 
-    return std.mem.trimRight(u8, value, &[_]u8{ ' ', '\t' });
+    return std.mem.trim(u8, value, &[_]u8{ ' ', '\t' });
 }
 
 pub const Config = struct {
@@ -103,7 +105,7 @@ pub const Config = struct {
     /// Handshake read timeout after first byte arrives
     handshake_timeout_sec: u32 = 15,
     tag: ?[16]u8 = null,
-    tls_domain: []const u8 = "google.com",
+    tls_domain: []const u8 = default_tls_domain,
     users: std.StringHashMap([16]u8),
     /// Users that always bypass MiddleProxy and connect to DC directly.
     /// Section: [access.direct_users] (alias: [access.admins])
@@ -134,10 +136,13 @@ pub const Config = struct {
     /// Use only if you know your host has enough memory for the configured limits.
     unsafe_override_limits: bool = false,
     /// Test-only hook to redirect upstream connections locally
-    datacenter_override: ?std.net.Address = null,
+    datacenter_override: ?net.IpAddress = null,
     /// Upstream egress mode. Parsed from [upstream].type.
     /// Supported values: auto | direct | tunnel | socks5 | http.
     upstream_mode: UpstreamMode = .auto,
+    /// Allow fallback to direct egress when explicit upstream mode
+    /// (socks5/http) is misconfigured or unavailable.
+    allow_direct_fallback: bool = false,
     /// Proxy server host for socks5/http upstream modes.
     /// Parsed from [upstream.socks5].host or [upstream.http].host.
     upstream_proxy_host: ?[]const u8 = null,
@@ -206,9 +211,13 @@ pub const Config = struct {
     }
 
     pub fn loadFromFile(allocator: std.mem.Allocator, path: []const u8) !Config {
-        const file = try std.fs.cwd().openFile(path, .{});
-        defer file.close();
-        const content = try file.readToEndAlloc(allocator, 1024 * 1024);
+        const io = std.Io.Threaded.global_single_threaded.io();
+        const content = try std.Io.Dir.cwd().readFileAlloc(
+            io,
+            path,
+            allocator,
+            .limited(1024 * 1024),
+        );
         defer allocator.free(content);
         return parse(allocator, content);
     }
@@ -218,6 +227,7 @@ pub const Config = struct {
             .users = std.StringHashMap([16]u8).init(allocator),
             .direct_users = std.StringHashMap(void).init(allocator),
         };
+        errdefer cfg.deinit(allocator);
 
         var lines = std.mem.splitScalar(u8, content, '\n');
         var in_users_section = false;
@@ -272,9 +282,9 @@ pub const Config = struct {
 
                 if (in_users_section) {
                     // Parse user secret (32 hex chars = 16 bytes)
-                    if (value.len != 32) continue;
+                    if (value.len != 32) return error.InvalidUserSecretLength;
                     var secret: [16]u8 = undefined;
-                    _ = std.fmt.hexToBytes(&secret, value) catch continue;
+                    _ = std.fmt.hexToBytes(&secret, value) catch return error.InvalidUserSecretHex;
                     const name = try allocator.dupe(u8, key);
                     try cfg.users.put(name, secret);
                 } else if (in_direct_users_section) {
@@ -378,6 +388,8 @@ pub const Config = struct {
                         if (parseUpstreamMode(value)) |mode| {
                             cfg.upstream_mode = mode;
                         }
+                    } else if (std.mem.eql(u8, key, "allow_direct_fallback")) {
+                        cfg.allow_direct_fallback = std.mem.eql(u8, value, "true");
                     }
                 } else if (in_upstream_socks5_section or in_upstream_http_section) {
                     if (std.mem.eql(u8, key, "host")) {
@@ -418,8 +430,8 @@ pub const Config = struct {
         }
         direct_users.deinit();
 
-        // Free tls_domain if it was allocated (not the default)
-        if (!std.mem.eql(u8, self.tls_domain, "google.com")) {
+        // Free tls_domain only when it does not point to the compile-time default.
+        if (self.tls_domain.ptr != default_tls_domain.ptr) {
             allocator.free(self.tls_domain);
         }
         if (self.public_ip) |ip| {
@@ -693,19 +705,14 @@ test "parse config - spaces and tabs" {
     try std.testing.expect(cfg.users.contains("user"));
 }
 
-test "parse config - invalid hex secret skipped" {
+test "parse config - invalid user secret fails fast" {
     const content =
         \\[access.users]
         \\valid = "00112233445566778899aabbccddeeff"
         \\invalid_len = "001122"
         \\invalid_hex = "zz112233445566778899aabbccddeeff"
     ;
-
-    var cfg = try Config.parse(std.testing.allocator, content);
-    defer cfg.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(usize, 1), cfg.users.count());
-    try std.testing.expect(cfg.users.contains("valid"));
+    try std.testing.expectError(error.InvalidUserSecretLength, Config.parse(std.testing.allocator, content));
 }
 
 test "parse config - getUserSecrets" {

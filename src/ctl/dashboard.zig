@@ -32,7 +32,7 @@ pub const DashboardOpts = struct {
 };
 
 /// Run in CLI mode.
-pub fn run(ui: *Tui, allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void {
+pub fn run(ui: *Tui, allocator: std.mem.Allocator, args: *std.process.Args.Iterator) !void {
     var opts = DashboardOpts{};
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--quiet")) {
@@ -63,19 +63,45 @@ fn uvExists() bool {
 fn bootstrapUv(ui: *Tui, allocator: std.mem.Allocator) bool {
     ui.step("Installing uv package manager from GitHub...");
 
-    // Download the latest release tarball from GitHub and extract `uv` binary.
-    // GitHub is reliably accessible even when astral.sh is blocked.
-    const result = sys.exec(allocator, &.{
-        "sh", "-c",
+    const archive_name = switch (sys.getArch() catch {
+        ui.fail("Unable to detect CPU architecture for uv bootstrap");
+        return false;
+    }) {
+        .x86_64 => "uv-x86_64-unknown-linux-gnu.tar.gz",
+        .aarch64 => "uv-aarch64-unknown-linux-gnu.tar.gz",
+    };
+
+    const uv_url = std.fmt.allocPrint(
+        allocator,
+        "https://github.com/astral-sh/uv/releases/latest/download/{s}",
+        .{archive_name},
+    ) catch {
+        ui.fail("Failed to prepare uv download URL");
+        return false;
+    };
+    defer allocator.free(uv_url);
+
+    const install_script = std.fmt.allocPrint(
+        allocator,
         \\set -e
-        \\UV_URL="https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-unknown-linux-gnu.tar.gz"
+        \\UV_URL="{s}"
         \\TMP_DIR=$(mktemp -d)
         \\trap 'rm -rf "$TMP_DIR"' EXIT
         \\curl -fsSL "$UV_URL" -o "$TMP_DIR/uv.tar.gz"
         \\tar -xzf "$TMP_DIR/uv.tar.gz" -C "$TMP_DIR" --strip-components=1
         \\install -m 0755 "$TMP_DIR/uv" /usr/local/bin/uv
         \\if [ -f "$TMP_DIR/uvx" ]; then install -m 0755 "$TMP_DIR/uvx" /usr/local/bin/uvx; fi
-    }) catch {
+    ,
+        .{uv_url},
+    ) catch {
+        ui.fail("Failed to prepare uv install script");
+        return false;
+    };
+    defer allocator.free(install_script);
+
+    // Download the latest release tarball from GitHub and extract `uv` binary.
+    // GitHub is reliably accessible even when astral.sh is blocked.
+    const result = sys.exec(allocator, &.{ "sh", "-c", install_script }) catch {
         ui.fail("Failed to download uv from GitHub");
         return false;
     };
@@ -149,9 +175,10 @@ pub fn execute(ui: *Tui, allocator: std.mem.Allocator, opts: DashboardOpts) !voi
     ui.step("Installing Python dependencies (fastapi, uvicorn, psutil, websockets)...");
 
     const pip_res = sys.exec(allocator, &.{
-        "uv",     "pip",   "install",
-        "--python", VENV_PYTHON,
-        "fastapi", "uvicorn", "psutil", "websockets", "starlette",
+        "uv",        "pip",       "install",
+        "--python",  VENV_PYTHON, "fastapi",
+        "uvicorn",   "psutil",    "websockets",
+        "starlette",
     }) catch {
         ui.fail("Failed to install Python dependencies via uv");
         return;
@@ -211,8 +238,8 @@ pub fn execute(ui: *Tui, allocator: std.mem.Allocator, opts: DashboardOpts) !voi
     if (!opts.quiet) {
         ui.summaryBox("Monitoring Dashboard Installed", &.{
             .{ .label = "Status:", .value = "systemctl status " ++ SERVICE_NAME },
-            .{ .label = "Logs:",   .value = "journalctl -u " ++ SERVICE_NAME ++ " -f" },
-            .{ .label = "Port:",   .value = "61208 (default, see config.toml)" },
+            .{ .label = "Logs:", .value = "journalctl -u " ++ SERVICE_NAME ++ " -f" },
+            .{ .label = "Port:", .value = "61208 (default, see config.toml)" },
             .{ .label = "", .style = .blank },
             .{ .label = "Access via secure SSH Tunnel:", .style = .success },
             .{ .label = "  ssh -L 61208:localhost:61208 root@<server_ip>", .style = .success },
