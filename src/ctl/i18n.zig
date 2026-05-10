@@ -81,6 +81,15 @@ pub const S = enum(u16) {
     // ── Tunnel ──
     tunnel_conf_prompt,
     tunnel_conf_help,
+    tunnel_vpn_type_prompt,
+    tunnel_vpn_amneziawg,
+    tunnel_pool_current,
+    tunnel_pool_empty,
+    tunnel_pool_action_prompt,
+    tunnel_pool_action_create,
+    tunnel_pool_action_replace,
+    tunnel_pool_selected_iface,
+    tunnel_pool_replace_warn,
 
     // ── Install ──
     install_header,
@@ -249,6 +258,24 @@ const en_strings = [_][]const u8{
     "VPN config or share link",
     // tunnel_conf_help
     "Path to a .conf file, or an Amnezia vpn:// share link.",
+    // tunnel_vpn_type_prompt
+    "VPN type",
+    // tunnel_vpn_amneziawg
+    "AmneziaWG",
+    // tunnel_pool_current
+    "Configured tunnel pool:",
+    // tunnel_pool_empty
+    "No tunnel pool configured yet.",
+    // tunnel_pool_action_prompt
+    "Tunnel pool action",
+    // tunnel_pool_action_create
+    "Create new tunnel",
+    // tunnel_pool_action_replace
+    "Replace existing tunnel",
+    // tunnel_pool_selected_iface
+    "Selected tunnel interface",
+    // tunnel_pool_replace_warn
+    "The selected tunnel config will be replaced.",
 
     // ── Install ──
     // install_header
@@ -296,9 +323,9 @@ const en_strings = [_][]const u8{
     // install_middle_proxy_prompt
     "Enable MiddleProxy (Telegram relay)?",
     // install_middle_proxy_help
-    "Routes traffic through Telegram's relay servers.\nUses more RAM (~2 MB per connection) but is required for:\n  • Promo tag / sponsored messages (ad_tag)\n  • Media loading (photos, video, stories) on non-Premium accounts",
+    "Routes traffic through Telegram's relay servers.\nUses more RAM (~2 MB per connection) but is required for:\n  • Promo tag / sponsored messages (ad_tag)\n  • Media loading (photos, video, stories) on non-Premium accounts\n\nTelegram calls are not supported: they require SOCKS-style paths that cannot be masked cleanly as HTTPS.",
     // install_middle_proxy_warn
-    "Without MiddleProxy: promo tags will not work, and non-Premium users may fail to load media.",
+    "Without MiddleProxy: promo tags will not work, and media on non-Premium accounts will not load. Telegram calls are unsupported.",
     // install_checking_deps
     "Installing system dependencies...",
     // install_resolving_tag
@@ -480,6 +507,24 @@ const ru_strings = [_][]const u8{
     "Конфигурация VPN или ссылка",
     // tunnel_conf_help
     "Путь к .conf файлу или ссылка vpn:// из Amnezia.",
+    // tunnel_vpn_type_prompt
+    "Тип VPN",
+    // tunnel_vpn_amneziawg
+    "AmneziaWG",
+    // tunnel_pool_current
+    "Настроенный пул туннелей:",
+    // tunnel_pool_empty
+    "Пул туннелей пока не настроен.",
+    // tunnel_pool_action_prompt
+    "Действие с пулом туннелей",
+    // tunnel_pool_action_create
+    "Создать новый туннель",
+    // tunnel_pool_action_replace
+    "Заменить существующий туннель",
+    // tunnel_pool_selected_iface
+    "Выбранный интерфейс туннеля",
+    // tunnel_pool_replace_warn
+    "Конфиг выбранного туннеля будет заменен.",
 
     // ── Install ──
     // install_header
@@ -527,9 +572,9 @@ const ru_strings = [_][]const u8{
     // install_middle_proxy_prompt
     "Включить MiddleProxy (релей Telegram)?",
     // install_middle_proxy_help
-    "Маршрутизирует трафик через релей-серверы Telegram.\nПотребляет больше RAM (~2 МБ на подключение), но необходим для:\n  • Промо-тега / спонсорских сообщений (ad_tag)\n  • Загрузки медиа (фото, видео, истории) на аккаунтах без Premium",
+    "Маршрутизирует трафик через релей-серверы Telegram.\nПотребляет больше RAM (~2 МБ на подключение), но необходим для:\n  • Промо-тега / спонсорских сообщений (ad_tag)\n  • Загрузки медиа (фото, видео, истории) на аккаунтах без Premium\n\nЗвонки не поддерживаются: Telegram проводит их только через SOCKS-пути, которые нельзя нормально замаскировать под HTTPS.",
     // install_middle_proxy_warn
-    "Без MiddleProxy: промо-тег не будет работать, а у пользователей без Premium могут не загружаться медиа.",
+    "Без MiddleProxy: промо-тег не будет работать, а медиа на аккаунтах без Premium не будут загружаться. Звонки не поддерживаются.",
     // install_checking_deps
     "Установка системных зависимостей...",
     // install_resolving_tag
