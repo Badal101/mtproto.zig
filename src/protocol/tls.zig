@@ -206,6 +206,15 @@ pub fn buildServerHelloWithTemplate(
     return response;
 }
 
+/// A TLS **fatal** `handshake_failure` alert record — what a server sends when it
+/// refuses to complete the handshake (e.g. nginx `ssl_reject_handshake on`). Send
+/// this, then close, so a rejected probe sees a real server-style teardown. A *fatal*
+/// alert legitimately precedes connection close; a warning-level alert followed by an
+/// immediate close would itself be anomalous (a distinguisher), so this is fatal.
+/// Bytes: record type 0x15 (alert), TLS 1.2 version 0x0303, length 2,
+/// level 2 (fatal), description 40 (handshake_failure, RFC 8446 §6).
+pub const reject_handshake_alert = [_]u8{ 0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x28 };
+
 // ============= Nginx/OpenSSL TLS 1.3 Template =============
 //
 // Pre-built at comptime to match the fingerprint of Nginx 1.25+ with OpenSSL 3.x.
@@ -1116,6 +1125,13 @@ fn buildTlsAuthClientHello(
     out[digest_pos + 31] = computed[31] ^ ts_bytes[3];
 
     return out[0..total_len];
+}
+
+test "reject_handshake_alert wire format" {
+    // record type 0x15 (alert), TLS 1.2 version, length 2, level 2 (fatal),
+    // description 40 (handshake_failure).
+    try std.testing.expectEqual(@as(usize, 7), reject_handshake_alert.len);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x28 }, &reject_handshake_alert);
 }
 
 test "extractSni - fragmented and overlong records" {
