@@ -78,15 +78,31 @@ fn execute(ui: *Tui, allocator: std.mem.Allocator) !void {
         "mtproto-mask-health.service",
         "mtproto-tunnel-pool.timer",
         "mtproto-tunnel-pool.service",
+        "mtproto-singbox-egress.service",
     };
     for (services) |svc| {
-        _ = sys.execForward(&.{ "systemctl", "stop", svc }) catch {};
-        _ = sys.execForward(&.{ "systemctl", "disable", svc }) catch {};
-        // Remove unit files
-        var path_buf: [128]u8 = undefined;
-        const path = std.fmt.bufPrint(&path_buf, "/etc/systemd/system/{s}.service", .{svc}) catch continue;
+        // Quiet: this runs under a spinner and most of these units aren't present in any
+        // given deploy, so `stop`/`disable` would spew "Unit not loaded" / "Removed ..."
+        // noise even on a perfectly clean uninstall.
+        sys.execSilent(allocator, &.{ "systemctl", "stop", svc });
+        sys.execSilent(allocator, &.{ "systemctl", "disable", svc });
+        // Remove the unit file. Entries already carrying a `.timer`/`.service` suffix are
+        // full unit names; bare ones (e.g. "mtproto-proxy") get `.service` appended. The
+        // old code always appended `.service`, so "mtproto-mask-health.service" tried to
+        // delete "...service.service" and left the real file behind.
+        var path_buf: [160]u8 = undefined;
+        const path = if (std.mem.indexOfScalar(u8, svc, '.') != null)
+            std.fmt.bufPrint(&path_buf, "/etc/systemd/system/{s}", .{svc}) catch continue
+        else
+            std.fmt.bufPrint(&path_buf, "/etc/systemd/system/{s}.service", .{svc}) catch continue;
         _ = sys.execForward(&.{ "rm", "-f", path }) catch {};
     }
+
+    // sing-box tunnel egress provider artifacts (upstream.type=tunnel via sbx0).
+    _ = sys.execForward(&.{ "rm", "-f", "/etc/systemd/system/mtproto-singbox-egress.service" }) catch {};
+    _ = sys.execForward(&.{ "rm", "-f", "/etc/mtproto-proxy/singbox-egress.json" }) catch {};
+    _ = sys.execForward(&.{ "rm", "-f", "/usr/local/bin/mtproto-singbox-route.sh" }) catch {};
+    _ = sys.execForward(&.{ "rm", "-f", "/usr/local/bin/sing-box" }) catch {};
 
     _ = sys.execForward(&.{ "rm", "-f", "/etc/systemd/system/mtproto-mask-health.timer" }) catch {};
     _ = sys.execForward(&.{ "rm", "-f", "/etc/systemd/system/mtproto-tunnel-pool.timer" }) catch {};
@@ -107,14 +123,18 @@ fn execute(ui: *Tui, allocator: std.mem.Allocator) !void {
 
     // 3. Remove user
     const userdel = sys.commandOrPath("userdel", &.{ "/usr/sbin/userdel", "/sbin/userdel" });
-    _ = sys.execForward(&.{ userdel, "mtproto" }) catch {};
+    sys.execSilent(allocator, &.{ userdel, "mtproto" });
 
-    // 4. Cleanup tunnel routing artifacts (new + legacy)
-    _ = sys.execForward(&.{ "ip", "-4", "rule", "del", "fwmark", "200", "table", "200" }) catch {};
-    _ = sys.execForward(&.{ "ip", "-4", "route", "flush", "table", "200" }) catch {};
+    // 4. Cleanup tunnel routing artifacts (new + legacy). Loop the rule delete: the
+    //    sing-box egress adds an unprioritized `fwmark 200 lookup 200` rule while the awg
+    //    pool adds a prioritized one, so several matching rules may exist.
+    _ = sys.execForward(&.{ "bash", "-c", "while ip -4 rule del fwmark 200 table 200 2>/dev/null; do :; done; while ip -4 rule del fwmark 200 lookup 200 2>/dev/null; do :; done" }) catch {};
+    // Quiet: an empty/absent table 200 or netns makes these print "FIB table does not
+    // exist" / "Cannot remove namespace" even though there's simply nothing to clean.
+    sys.execSilent(allocator, &.{ "ip", "-4", "route", "flush", "table", "200" });
     _ = sys.execForward(&.{ "rm", "-f", "/usr/local/bin/setup_tunnel.sh" }) catch {};
     _ = sys.execForward(&.{ "rm", "-f", "/usr/local/bin/setup_netns.sh" }) catch {};
-    _ = sys.execForward(&.{ "ip", "netns", "del", "tg_proxy_ns" }) catch {};
+    sys.execSilent(allocator, &.{ "ip", "netns", "del", "tg_proxy_ns" });
 
     // 5. Remove masking config. The site name MUST match masking.zig
     //    ("mtproto-masking"); the old "mtproto-mask" name never matched the
@@ -132,7 +152,7 @@ fn execute(ui: *Tui, allocator: std.mem.Allocator) !void {
 
     // Attempt Nginx reload if active, to flush deleted configs
     if (sys.isServiceActive("nginx")) {
-        _ = sys.execForward(&.{ "systemctl", "try-reload-or-restart", "nginx" }) catch {};
+        sys.execSilent(allocator, &.{ "systemctl", "try-reload-or-restart", "nginx" });
     }
 
     // 6. Clear the TCPMSS SYN/ACK clamp the installer set. The install rule
@@ -159,7 +179,7 @@ fn execute(ui: *Tui, allocator: std.mem.Allocator) !void {
     if (sys.commandExists("ufw")) {
         var ufw_buf: [16]u8 = undefined;
         const port_rule = std.fmt.bufPrint(&ufw_buf, "{s}/tcp", .{configured_port}) catch "443/tcp";
-        _ = sys.execForward(&.{ "ufw", "delete", "allow", port_rule }) catch {};
+        sys.execSilent(allocator, &.{ "ufw", "delete", "allow", port_rule });
     }
 
     // Note: Self-removal: The mtbuddy binary is running right now. Removing it while running usually works on Linux.
