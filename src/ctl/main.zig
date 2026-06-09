@@ -22,7 +22,7 @@ const nfqws = @import("nfqws.zig");
 const tunnel = @import("tunnel.zig");
 const recovery = @import("recovery.zig");
 const dashboard = @import("dashboard.zig");
-const egress = @import("egress.zig");
+const tunnel_singbox = @import("tunnel_singbox.zig");
 const ipv6hop = @import("ipv6hop.zig");
 const version_mod = @import("version");
 const uninstall = @import("uninstall.zig");
@@ -136,7 +136,7 @@ pub fn main(init: std.process.Init) !void {
                 } else if (std.mem.eql(u8, sub, "tunnel")) {
                     return tunnel.run(&ui, allocator, &remaining_args);
                 } else if (std.mem.eql(u8, sub, "egress")) {
-                    return egress.run(&ui, allocator, &remaining_args);
+                    return tunnel_singbox.run(&ui, allocator, &remaining_args);
                 } else if (std.mem.eql(u8, sub, "recovery")) {
                     return recovery.run(&ui, allocator, &remaining_args);
                 } else if (std.mem.eql(u8, sub, "dashboard")) {
@@ -256,7 +256,7 @@ fn interactiveMain(ui: *Tui, allocator: std.mem.Allocator) !void {
             .install => try install.runInteractive(ui, allocator),
             .update => try update.runInteractive(ui, allocator),
             .masking => try masking.runInteractive(ui, allocator),
-            .tunnel => try tunnel.runInteractive(ui, allocator),
+            .tunnel => try tunnelOrEgressInteractive(ui, allocator),
             .dashboard => try dashboard.runInteractive(ui, allocator),
             .recovery => try recovery.runInteractive(ui, allocator),
             .ipv6hop => try ipv6hop.runInteractive(ui, allocator),
@@ -266,6 +266,20 @@ fn interactiveMain(ui: *Tui, allocator: std.mem.Allocator) !void {
             .exit => return,
         }
     }
+}
+
+// "Setup tunnel" now asks for the upstream egress type first: AmneziaWG config (the
+// existing flow) or a VPN share-link (vless/vmess/trojan/ss -> sing-box TUN tunnel,
+// wireguard:// -> native WG tunnel). Dispatched here (not inside tunnel.zig) so tunnel
+// and egress don't import each other.
+fn tunnelOrEgressInteractive(ui: *Tui, allocator: std.mem.Allocator) !void {
+    const items = [_][]const u8{
+        i18n.get(ui.lang, .tunnel_vpn_amneziawg),
+        tr(ui.lang, "VPN share-link (VLESS-Reality / VMess / Trojan / Shadowsocks / WireGuard)", "VPN-ссылка (VLESS-Reality / VMess / Trojan / Shadowsocks / WireGuard)"),
+    };
+    const idx = try ui.menu(i18n.get(ui.lang, .tunnel_vpn_type_prompt), &items);
+    if (idx == 1) return tunnel_singbox.runInteractive(ui, allocator);
+    return tunnel.runInteractive(ui, allocator);
 }
 
 fn restartProxy(ui: *Tui, allocator: std.mem.Allocator) void {
