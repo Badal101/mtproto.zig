@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: mtproto-zig-proxy
+    env: docker
+    plan: free
+    region: oregon # Choose your preferred region
+    port: 443
+    envVars:
+      - key: TZ
+        value: UTC
